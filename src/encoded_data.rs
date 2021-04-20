@@ -445,6 +445,18 @@ impl EncodedData {
             })
         }
     }
+
+    pub fn decode_all(mut data: &[u8]) -> Result<(Vec<Self>, usize), DecodeError> {
+        let mut ret = vec![];
+        let mut tot_size = 0;
+        while !data.is_empty() {
+            let (o, size) = Self::decode(data)?;
+            tot_size += size;
+            ret.push(o);
+            data = &data[size..];
+        }
+        Ok((ret, tot_size))
+    }
 }
 
 #[cfg(test)]
