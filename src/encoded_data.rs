@@ -4,6 +4,7 @@ use crate::define::{
 };
 use crate::varint;
 use std::collections::HashMap;
+use std::convert::{TryFrom, TryInto};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum EncodedSpecial {
@@ -31,11 +32,11 @@ pub enum EncodedData {
     Alias(u64),
 }
 
-impl From<&serde_json::Value> for EncodedData {
-    fn from(v: &serde_json::Value) -> Self {
+impl From<serde_json::Value> for EncodedData {
+    fn from(v: serde_json::Value) -> Self {
         match v {
             serde_json::Value::Null => Self::Special(EncodedSpecial::Null),
-            serde_json::Value::Bool(b) => Self::Integer(EncodedInteger::Bool(*b)),
+            serde_json::Value::Bool(b) => Self::Integer(EncodedInteger::Bool(b)),
             serde_json::Value::Number(n) => {
                 if let Some(n) = n.as_u64() {
                     Self::Integer(EncodedInteger::Positive(n))
@@ -45,12 +46,64 @@ impl From<&serde_json::Value> for EncodedData {
                     Self::Float(n.as_f64().unwrap())
                 }
             }
-            serde_json::Value::String(s) => Self::String(s.clone()),
-            serde_json::Value::Array(list) => Self::Array(list.iter().map(|o| o.into()).collect()),
+            serde_json::Value::String(s) => Self::String(s),
+            serde_json::Value::Array(list) => {
+                Self::Array(list.into_iter().map(|o| o.into()).collect())
+            }
             serde_json::Value::Object(map) => {
-                Self::Object(map.iter().map(|(k, o)| (k.clone(), o.into())).collect())
+                Self::Object(map.into_iter().map(|(k, o)| (k, o.into())).collect())
             }
         }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum EncodedDataToJsonError {
+    NegativeIntegerTooBig(u64),
+    BadFloat(f64),
+    UnsupportedAliasDataType,
+    UnsupportedNoneDataType,
+    UnsupportedDefineDataType,
+    UnsupportedForgetDataType,
+}
+
+impl TryFrom<EncodedData> for serde_json::Value {
+    type Error = EncodedDataToJsonError;
+    fn try_from(v: EncodedData) -> Result<Self, Self::Error> {
+        Ok(match v {
+            EncodedData::Special(EncodedSpecial::Null) => Self::Null,
+            EncodedData::Special(EncodedSpecial::None) => {
+                return Err(EncodedDataToJsonError::UnsupportedNoneDataType)
+            }
+            EncodedData::Special(EncodedSpecial::Define(_)) => {
+                return Err(EncodedDataToJsonError::UnsupportedDefineDataType)
+            }
+            EncodedData::Special(EncodedSpecial::Forget(_)) => {
+                return Err(EncodedDataToJsonError::UnsupportedForgetDataType)
+            }
+            EncodedData::Integer(EncodedInteger::Bool(b)) => Self::Bool(b),
+            EncodedData::Integer(EncodedInteger::Positive(n)) => Self::Number((n).into()),
+            EncodedData::Integer(EncodedInteger::Negative(n)) => Self::Number(
+                (-i64::try_from(n)
+                    .map_err(|_| EncodedDataToJsonError::NegativeIntegerTooBig(n))?)
+                .into(),
+            ),
+            EncodedData::Float(n) => Self::Number(
+                serde_json::Number::from_f64(n).ok_or(EncodedDataToJsonError::BadFloat(n))?,
+            ),
+            EncodedData::String(s) => Self::String(s),
+            EncodedData::Array(list) => Self::Array(
+                list.into_iter()
+                    .map(|o| o.try_into())
+                    .collect::<Result<_, _>>()?,
+            ),
+            EncodedData::Object(map) => Self::Object(
+                map.into_iter()
+                    .map(|(k, o)| o.try_into().map(|v| (k.clone(), v)))
+                    .collect::<Result<_, _>>()?,
+            ),
+            EncodedData::Alias(_) => return Err(EncodedDataToJsonError::UnsupportedAliasDataType),
+        })
     }
 }
 
@@ -408,8 +461,15 @@ mod tests {
             assert_eq!(decoded_size, size);
         }
 
+        fn check_w_json(object: EncodedData, size: usize) {
+            check(object.clone(), size);
+            let json: serde_json::Value = object.clone().try_into().unwrap();
+            let reencoded: EncodedData = json.into();
+            assert_eq!(reencoded, object);
+        }
+
         check(EncodedData::Special(EncodedSpecial::None), 1);
-        check(EncodedData::Special(EncodedSpecial::Null), 1);
+        check_w_json(EncodedData::Special(EncodedSpecial::Null), 1);
         check(
             EncodedData::Special(EncodedSpecial::Define(Box::new(EncodedData::Special(
                 EncodedSpecial::Null,
@@ -417,23 +477,23 @@ mod tests {
             2,
         );
         check(EncodedData::Special(EncodedSpecial::Forget(4)), 2);
-        check(EncodedData::Integer(EncodedInteger::Positive(0)), 2);
+        check_w_json(EncodedData::Integer(EncodedInteger::Positive(0)), 2);
         check(EncodedData::Integer(EncodedInteger::Negative(0)), 2);
-        check(EncodedData::Integer(EncodedInteger::Positive(1)), 2);
-        check(EncodedData::Integer(EncodedInteger::Positive(0xFF_FF)), 3);
-        check(
+        check_w_json(EncodedData::Integer(EncodedInteger::Positive(1)), 2);
+        check_w_json(EncodedData::Integer(EncodedInteger::Positive(0xFF_FF)), 3);
+        check_w_json(
             EncodedData::Integer(EncodedInteger::Negative(0xFF_FF_FF_FF)),
             5,
         );
-        check(EncodedData::Integer(EncodedInteger::Bool(true)), 1);
-        check(EncodedData::Integer(EncodedInteger::Bool(false)), 1);
-        check(EncodedData::Float(1.2f64), 9);
-        check(EncodedData::String("abc".to_string()), 4);
-        check(
+        check_w_json(EncodedData::Integer(EncodedInteger::Bool(true)), 1);
+        check_w_json(EncodedData::Integer(EncodedInteger::Bool(false)), 1);
+        check_w_json(EncodedData::Float(1.2f64), 9);
+        check_w_json(EncodedData::String("abc".to_string()), 4);
+        check_w_json(
             EncodedData::String("1234567890ABCDEF".to_string()),
             1 + 1 + 16,
         );
-        check(
+        check_w_json(
             EncodedData::String("1234567890ABCDEF1234567890ABCDEF".to_string()),
             1 + 1 + 32,
         );
@@ -442,7 +502,7 @@ mod tests {
             EncodedData::Integer(EncodedInteger::Positive(5)),
             EncodedData::String("abc".to_string()),
         ]);
-        check(array.clone(), 1 + 1 + 2 + 4);
+        check_w_json(array.clone(), 1 + 1 + 2 + 4);
         let mut map = HashMap::new();
         map.insert(
             "null".to_string(),
@@ -453,7 +513,7 @@ mod tests {
             EncodedData::Integer(EncodedInteger::Positive(5)),
         );
         map.insert("string".to_string(), EncodedData::String("abc".to_string()));
-        check(EncodedData::Object(map.clone()), 1 + 5 + 1 + 9 + 2 + 7 + 4);
+        check_w_json(EncodedData::Object(map.clone()), 1 + 5 + 1 + 9 + 2 + 7 + 4);
 
         let mut new_map = HashMap::new();
         new_map.insert(
@@ -466,7 +526,7 @@ mod tests {
         );
         new_map.insert("map".to_string(), EncodedData::Object(map));
         new_map.insert("array".to_string(), array);
-        check(
+        check_w_json(
             EncodedData::Object(new_map),
             1 + 5 + 1 + 9 + 2 + 4 + 1 + 5 + 1 + 9 + 2 + 7 + 4 + 6 + 1 + 1 + 2 + 4,
         );
