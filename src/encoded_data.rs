@@ -162,23 +162,30 @@ pub enum DecodeError {
     BadUtf8(std::str::Utf8Error),
 }
 
+pub const DATA_TYPE_SIZE: u8 = 3;
+pub const DATA_TYPE_SHIFT: u8 = 8 - DATA_TYPE_SIZE;
+pub const STRING_FLAG_LENGTH_SIZE: u8 = 5;
+pub const ARRAY_FLAG_LENGTH_SIZE: u8 = 5;
+pub const OBJECT_FLAG_LENGTH_SIZE: u8 = 5;
+pub const ALIAS_FLAG_ID_SIZE: u8 = 5;
+
 impl EncodedData {
     pub fn encode(&self) -> Vec<u8> {
         match self {
             Self::Special(spe) => match spe {
                 EncodedSpecial::None => {
-                    vec![data_type::SPECIAL << 5 | special_type::NONE]
+                    vec![data_type::SPECIAL << DATA_TYPE_SHIFT | special_type::NONE]
                 }
                 EncodedSpecial::Null => {
-                    vec![data_type::SPECIAL << 5 | special_type::NULL]
+                    vec![data_type::SPECIAL << DATA_TYPE_SHIFT | special_type::NULL]
                 }
                 EncodedSpecial::Define(o) => [
-                    vec![data_type::SPECIAL << 5 | special_type::DEFINE],
+                    vec![data_type::SPECIAL << DATA_TYPE_SHIFT | special_type::DEFINE],
                     o.encode(),
                 ]
                 .concat(),
                 EncodedSpecial::Forget(id) => [
-                    vec![data_type::SPECIAL << 5 | special_type::FORGET],
+                    vec![data_type::SPECIAL << DATA_TYPE_SHIFT | special_type::FORGET],
                     varint::encode(*id),
                 ]
                 .concat(),
@@ -187,41 +194,60 @@ impl EncodedData {
                 EncodedInteger::Positive(n) => {
                     let encoded = encode_compact_u64(*n);
                     let data_size = encoded.len() as u8;
-                    [vec![data_type::INTEGER << 5 | data_size], encoded].concat()
+                    [
+                        vec![data_type::INTEGER << DATA_TYPE_SHIFT | data_size],
+                        encoded,
+                    ]
+                    .concat()
                 }
                 EncodedInteger::Negative(n) => {
                     let encoded = encode_compact_u64(*n);
                     let data_size = encoded.len() as u8;
-                    [vec![data_type::INTEGER << 5 | 1 << 4 | data_size], encoded].concat()
+                    [
+                        vec![data_type::INTEGER << DATA_TYPE_SHIFT | 1 << 4 | data_size],
+                        encoded,
+                    ]
+                    .concat()
                 }
                 EncodedInteger::Bool(b) => {
                     let b_flag = if *b { 1 } else { 0 };
-                    vec![data_type::INTEGER << 5 | b_flag << 4]
+                    vec![data_type::INTEGER << DATA_TYPE_SHIFT | b_flag << 4]
                 }
             },
-            Self::Float(f) => {
-                [vec![data_type::FLOAT << 5 | 8].as_slice(), &f.to_le_bytes()].concat()
-            }
+            Self::Float(f) => [
+                vec![data_type::FLOAT << DATA_TYPE_SHIFT].as_slice(),
+                &f.to_le_bytes(),
+            ]
+            .concat(),
             Self::String(s) => {
-                let (flag, data_type_length_data) = encode_data_type_length(s.len() as u64, 5);
+                let (flag, data_type_length_data) =
+                    encode_data_type_length(s.len() as u64, STRING_FLAG_LENGTH_SIZE);
                 [
-                    vec![data_type::STRING << 5 | flag].as_slice(),
+                    vec![data_type::STRING << DATA_TYPE_SHIFT | flag].as_slice(),
                     &data_type_length_data,
                     s.as_bytes(),
                 ]
                 .concat()
             }
             Self::Array(array) => {
-                let (flag, data_type_length_data) = encode_data_type_length(array.len() as u64, 5);
-                let mut ret = vec![vec![data_type::ARRAY << 5 | flag], data_type_length_data];
+                let (flag, data_type_length_data) =
+                    encode_data_type_length(array.len() as u64, ARRAY_FLAG_LENGTH_SIZE);
+                let mut ret = vec![
+                    vec![data_type::ARRAY << DATA_TYPE_SHIFT | flag],
+                    data_type_length_data,
+                ];
                 for o in array.iter() {
                     ret.push(o.encode());
                 }
                 ret.concat()
             }
             Self::Object(map) => {
-                let (flag, data_type_length_data) = encode_data_type_length(map.len() as u64, 5);
-                let mut ret = vec![vec![data_type::OBJECT << 5 | flag], data_type_length_data];
+                let (flag, data_type_length_data) =
+                    encode_data_type_length(map.len() as u64, OBJECT_FLAG_LENGTH_SIZE);
+                let mut ret = vec![
+                    vec![data_type::OBJECT << DATA_TYPE_SHIFT | flag],
+                    data_type_length_data,
+                ];
                 for (k, o) in map.iter() {
                     ret.push(varint::encode(k.len() as u64));
                     ret.push(k.as_bytes().to_vec());
@@ -230,8 +256,8 @@ impl EncodedData {
                 ret.concat()
             }
             Self::Alias(id) => {
-                let (flag, id_data) = encode_data_type_length(*id, 5);
-                [vec![data_type::ALIAS << 5 | flag], id_data].concat()
+                let (flag, id_data) = encode_data_type_length(*id, ALIAS_FLAG_ID_SIZE);
+                [vec![data_type::ALIAS << DATA_TYPE_SHIFT | flag], id_data].concat()
             }
         }
     }
@@ -242,7 +268,7 @@ impl EncodedData {
                 return Err(DecodeError::MissingBytes(1));
             }
             let ctrl = data.get_unchecked(0);
-            let data_type_value = ctrl >> 5;
+            let data_type_value = ctrl >> DATA_TYPE_SHIFT;
             let data_type = match DataType::from(data_type_value) {
                 Some(data_type) => data_type,
                 None => return Err(DecodeError::UnknownDataType(data_type_value)),
